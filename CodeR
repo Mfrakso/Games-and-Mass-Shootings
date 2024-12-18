@@ -1,0 +1,186 @@
+install.packages("dplyr")
+install.packages("ggplot2")
+install.packages("lubridate")
+install.packages("stringr")
+install.packages("reshape2")
+
+shooting_data <- read.csv("dictionary_stanford_msa_release_06142016.csv")
+console_data <- read.csv("vgsales.csv")
+steam_data <- read.csv("steam.csv")
+Then I needed to remove unneeded variables. I also needed to narrow down the shooters to exclude Gang Shootings and similar, so that I was only including shootings that did not have a more criminal cause. Lastly, I needed to narrow down the game data to only include FPS games.
+shooting_data_short <- shooting_data[,c("Total.Number.of.Victims", "Date", "Class")]
+shooting_data_shorter <- subset(shooting_data_short, Class=="MS" | Class=="SPK")
+console_data_short <- console_data[,c("Year", "Genre","NA_Sales")]
+console_data_shorter <- subset(console_data_short, Genre=="Shooter")
+steam_data_short <- steam_data[,c("release_date", "steamspy_tags", "owners")]
+steam_data_short$fps <- grepl("FPS",steam_data_short$steamspy_tags, fixed=TRUE)
+steam_data_shorter <- subset(steam_data_short, fps==TRUE)
+One of my databases didn’t have exact dates, only years. And because I was working over such a long period of time (1966 through 2016), I decided to convert all of the dates to show year only.
+shooting_data_shorter$Date <- mdy(shooting_data_shorter$Date)
+shooting_data_shorter$Date <- as.character(format(shooting_data_shorter$Date,"%Y"))
+shooting_data_shorter$Date <- as.Date(shooting_data_shorter$Date, format="%Y")
+console_data_shorter$Year <- as.character(console_data_shorter$Year)
+console_data_shorter$Year <- as.Date(console_data_shorter$Year, format="%Y")
+steam_data_shorter$release_date <- ymd(steam_data_shorter$release_date)
+steam_data_shorter$release_date <- as.character(format(steam_data_shorter$release_date,"%Y"))
+steam_data_shorter$release_date <- as.Date(steam_data_shorter$release_date, format="%Y")
+The data for the Steam downloads listed the numbers as a range. The console game data listed number of owners in millions. I decided to find the center of each range and convert to millions to unify the two data sets.
+steam_data_shorter$owners <- as.character(steam_data_shorter$owners)
+ave_salesNames <- c("low","high")
+ave_sales <- colsplit(steam_data_shorter$owners,"-",ave_salesNames)
+ave_sales$ave <- ((ave_sales$low + ave_sales$high)/2)/1000000
+ave_sales <- ave_sales[,c("ave")]
+steam_data_final <- cbind(steam_data_shorter, ave_sales)
+After all of the narrowing down and unifying of data, I cleared out the data I would not be needing for analysis (like the type of game or type of shooting, since I’d already eliminated observations I wouldn’t be using).
+shooting_data_final <- shooting_data_shorter[,c("Total.Number.of.Victims", "Date")]
+shooting_data_final <- na.omit(shooting_data_final)
+console_data_final <- console_data_shorter[,c("Year", "NA_Sales")]
+console_data_final <- na.omit(console_data_final)
+steam_data_final <- steam_data_final[,c("release_date","ave_sales")]
+steam_data_final <- na.omit(steam_data_final)
+After all of that, I still had three databases, and needed to combine them. I thought hard about how I might want to look at the data. I decided that I needed to count both the number of shooting incidents, and the number of victims in each year. However, I didn’t need to track the game sales separately, so those should be combined.
+In some years, especially early on, there were no game sales, but I still wanted to keep those years in the database. So I had to make sure that any NA value was replaced with a 0 value instead.
+years <- c(1966:2016)
+final_data <- data.frame(years)
+final_data$years <- as.character(final_data$years) %>%
+  as.Date(final_data$years, format = "%Y")
+num_shootings_year <- shooting_data_final %>% group_by(Date) %>% 
+  dplyr::summarise(num_shootings = n())
+num_victims_year <- shooting_data_final %>% group_by(Date) %>% 
+  dplyr::summarise(num_victims = sum(Total.Number.of.Victims))
+console_sales_year <- console_data_final %>% group_by(Year) %>%
+  dplyr::summarise(console_sales = sum(NA_Sales))
+steam_sales_year <- steam_data_final %>% group_by(release_date) %>%
+  dplyr::summarise(steam_sales = sum(ave_sales))
+final_data$console_sales = vlookup(final_data$years, console_sales_year, 
+                                   result_column = 2, lookup_column = 1)
+final_data$steam_sales = vlookup(final_data$years, steam_sales_year, 
+                                   result_column = 2, lookup_column = 1)
+final_data$num_shootings = vlookup(final_data$years, num_shootings_year, 
+                                   result_column = 2, lookup_column = 1)
+final_data$num_victims = vlookup(final_data$years, num_victims_year, 
+                                 result_column = 2, lookup_column = 1)
+final_data <- na_replace(final_data, fill=0)
+final_data$game_sales = final_data$console_sales + final_data$steam_sales
+final_data <- final_data[,c("years", "num_shootings","num_victims",
+                            "game_sales")]
+Then I wanted to take a look at my data in a visual fashion, so I plotted line graphs showing all of the data. When the high number of victims made it hard to see the other two lines late in the timeframe, I plotted just the game sales and number of incidents separately also.
+plot_all <- ggplot() +
+  geom_line(data=final_data,aes(x=years,y=num_shootings),color="red") +
+  geom_line(data=final_data,aes(x=years,y=num_victims),color="orange") +
+  geom_line(data=final_data,aes(x=years,y=game_sales),color="blue") +
+  labs(y="Count OR 
+       Sales in Million $", x = "Year 
+       
+       Blue=Game Sales
+       Red= Number of Shootings, Orange = Number of Victims" )
+plot_count_only <- ggplot() +
+  geom_line(data=final_data,aes(x=years,y=num_shootings),color="red") +
+  geom_line(data=final_data,aes(x=years,y=game_sales),color="blue") +
+  labs(y="Count OR 
+       Sales in Million $", x = "Year")
+plot_grid(plot_all, plot_count_only, nrow=2)
+ 
+Since my data were on very different scales, I wanted to unify them as much as possible. In order to do this, I divided each value by the max of its variable. This gave me a value from 0 to 1 for each value, but still retained the ratio for each variable
+final_data$num_shootings <- final_data$num_shootings/max(final_data$num_shootings)
+final_data$num_victims <- final_data$num_victims/max(final_data$num_victims)
+final_data$game_sales <- final_data$game_sales/max(final_data$game_sales)
+After doing that, I was ready to look at the correlation between the number of shootings and the number of game sales. Because this data is not normal, we need to use bootstrapping to analyze it properly. In addition, I wanted to see what a regression analysis would tell me.
+cor.test(final_data$game_sales,final_data$num_shootings,
+         use="complete.obs",method="pearson") 
+## 
+##  Pearson's product-moment correlation
+## 
+## data:  final_data$game_sales and final_data$num_shootings
+## t = 2.5172, df = 49, p-value = 0.01515
+## alternative hypothesis: true correlation is not equal to 0
+## 95 percent confidence interval:
+##  0.06926413 0.56160057
+## sample estimates:
+##       cor 
+## 0.3383886
+coef_det_inc <- lm(num_shootings ~ game_sales, data=final_data)
+summary(coef_det_inc)
+## 
+## Call:
+## lm(formula = num_shootings ~ game_sales, data = final_data)
+## 
+## Residuals:
+##      Min       1Q   Median       3Q      Max 
+## -0.20365 -0.05530 -0.03496  0.00257  0.89438 
+## 
+## Coefficients:
+##             Estimate Std. Error t value Pr(>|t|)  
+## (Intercept)  0.05191    0.03109   1.670   0.1014  
+## game_sales   0.27973    0.11113   2.517   0.0151 *
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## Residual standard error: 0.1833 on 49 degrees of freedom
+## Multiple R-squared:  0.1145, Adjusted R-squared:  0.09644 
+## F-statistic: 6.336 on 1 and 49 DF,  p-value: 0.01515
+The results of the test for Pearson’s r should be checked by bootstrapping, but I will admit to personal failure to code that properly after much difficulty. This is one of the reasons that having a team is good – talking through the coding would be helpful.
+Going forward with reviewing what is available from cor.test, it looks like there may a positive relationship between game sales and number of shooting incidents, but the confidence level (p-value) is way too low (or rather, the p-value is way too high) to make any statement with surety.
+On the regression analysis, it would seem that game sales could account for 11% of the variance in number of shooting incidents. But again, the confidence level is 0.01, and therefore no conclusions could confidently be made from this analysis.
+So, let’s have a look at the relationships between game sales and the number of victims per year.
+cor.test(final_data$game_sales, final_data$num_shootings)
+## 
+##  Pearson's product-moment correlation
+## 
+## data:  final_data$game_sales and final_data$num_shootings
+## t = 2.5172, df = 49, p-value = 0.01515
+## alternative hypothesis: true correlation is not equal to 0
+## 95 percent confidence interval:
+##  0.06926413 0.56160057
+## sample estimates:
+##       cor 
+## 0.3383886
+coef_det_vict <- lm(num_victims ~ game_sales, data=final_data)
+summary(coef_det_vict)
+## 
+## Call:
+## lm(formula = num_victims ~ game_sales, data = final_data)
+## 
+## Residuals:
+##      Min       1Q   Median       3Q      Max 
+## -0.31068 -0.07274 -0.02858  0.02335  0.78113 
+## 
+## Coefficients:
+##             Estimate Std. Error t value Pr(>|t|)    
+## (Intercept)  0.07274    0.03033   2.399 0.020300 *  
+## game_sales   0.44883    0.10839   4.141 0.000136 ***
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## Residual standard error: 0.1788 on 49 degrees of freedom
+## Multiple R-squared:  0.2592, Adjusted R-squared:  0.2441 
+## F-statistic: 17.15 on 1 and 49 DF,  p-value: 0.000136
+The results in this case show that there again appears to be a positive relationship between the number of game sales and the number of victims in each year. In this case, however, the confidence level is much higher, with a p-value of 0.0001, well below the 0.001 threshold.
+The regression analysis of this relationship appears to show that game sales could account for as much as 26% of the increased number of victims per year. This p-value is again -.000136, showing a decent confidence level.
+One thing that is vital to keep in mind is that although these analysis show a solid relationship, they do not show any cause-and-effect relationship between the two variables. There could easily be (and most likely is) at least one other factor to which they are both related.
+After seeing that the number of victims appears related, while the number of shootings does not, I wanted to check the average number of victims per incident each year.
+final_data$ave_num_victims=(final_data$num_victims/final_data$num_shootings)
+final_data <- na_replace(final_data, fill=0)
+coef_det_ave <- lm(ave_num_victims ~ game_sales, data=final_data)
+summary(coef_det_ave)
+## 
+## Call:
+## lm(formula = ave_num_victims ~ game_sales, data = final_data)
+## 
+## Residuals:
+##     Min      1Q  Median      3Q     Max 
+## -1.4618 -0.6943 -0.1191  0.3279  3.6187 
+## 
+## Coefficients:
+##             Estimate Std. Error t value Pr(>|t|)    
+## (Intercept)   1.4065     0.2009   7.000 6.62e-09 ***
+## game_sales    0.8384     0.7181   1.167    0.249    
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+## 
+## Residual standard error: 1.185 on 49 degrees of freedom
+## Multiple R-squared:  0.02706,    Adjusted R-squared:  0.007207 
+## F-statistic: 1.363 on 1 and 49 DF,  p-value: 0.2487
+In this case, we appear to be back to where we were with the number of incidents. The p-value is even higher here (0.2487), so no conclusion can be drawn from the cor.test or the linear regression.
+Conclusion
+Although it appears that there is a strong positive relationship between sales of first-person-shooter games and the number of victims in mass shootings (when grouped by year), we don’t see the same relationship between the game sales and either the number of shootings or the average number of victims per shooting.
